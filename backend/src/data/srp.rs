@@ -182,48 +182,145 @@ pub async fn fetch_corporation_wallet_journal(
 
 
 
-// Helper function to determine payment type and calculate coverage end date
-fn determine_srp_coverage(payment_amount: f64, payment_date: chrono::DateTime<chrono::Utc>) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
-    // Convert payment amount from millions to decimal format (e.g., 20000000 -> 20.0)
+fn daily_coverage_end(payment_date: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let payment_date_naive = payment_date.naive_utc();
+    let today_11am_time = chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap();
+
+    if payment_date_naive.time() < today_11am_time {
+        // Payment made before 11:00 UTC today, expires at 11:00 UTC today
+        let today_11am = payment_date_naive.date().and_hms_opt(11, 0, 0).unwrap();
+        chrono::DateTime::<chrono::Utc>::from_utc(today_11am, chrono::Utc)
+    } else {
+        // Payment made after 11:00 UTC today, expires at 11:00 UTC tomorrow
+        let tomorrow_11am = (payment_date_naive.date() + chrono::Duration::days(1))
+            .and_hms_opt(11, 0, 0)
+            .unwrap();
+        chrono::DateTime::<chrono::Utc>::from_utc(tomorrow_11am, chrono::Utc)
+    }
+}
+
+fn amount_matches(payment_amount_millions: f64, expected_millions: f64) -> bool {
+    (payment_amount_millions - expected_millions).abs() < 0.01
+}
+
+// Helper function to determine payment type and calculate coverage end date.
+// Full table amounts always match. FC-eligible characters may also pay
+// `fc_price_factor` of a normal tier (e.g. 0.5 of 20M = 10M for 1-character daily).
+fn determine_srp_coverage(
+    payment_amount: f64,
+    payment_date: chrono::DateTime<chrono::Utc>,
+    is_fc_eligible: bool,
+    fc_price_factor: f64,
+) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+    // Convert payment amount from ISK to millions (e.g., 20000000 -> 20.0)
     let payment_amount_decimal = payment_amount / 1_000_000.0;
-            // println!("Checking payment amount: {} ({} millions) against SRP tables", payment_amount, payment_amount_decimal);
-    
-    // Check if it's a daily payment
+
+    // Full-price matches first so FCs paying the normal amount still get that tier
     for (amount, _) in DAILY_PAYMENTS {
-        if (payment_amount_decimal - amount).abs() < 0.01 {
-            // Daily payment: coverage until the next 11:00 UTC
-            let payment_date_naive = payment_date.naive_utc();
-            let today_11am_time = chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap();
-            
-            // println!("DEBUG: Payment date: {}, time: {}, 11am time: {}", 
-            //          payment_date_naive.date(), payment_date_naive.time(), today_11am_time);
-            
-            let coverage_end = if payment_date_naive.time() < today_11am_time {
-                // Payment made before 11:00 UTC today, expires at 11:00 UTC today
-                let today_11am = payment_date_naive.date().and_hms_opt(11, 0, 0).unwrap();
-                let result = chrono::DateTime::<chrono::Utc>::from_utc(today_11am, chrono::Utc);
-                // println!("Payment at {} (before 11:00) -> expires at {}", payment_date_naive, result);
-                result
-            } else {
-                // Payment made after 11:00 UTC today, expires at 11:00 UTC tomorrow
-                let tomorrow_11am = (payment_date_naive.date() + chrono::Duration::days(1)).and_hms_opt(11, 0, 0).unwrap();
-                let result = chrono::DateTime::<chrono::Utc>::from_utc(tomorrow_11am, chrono::Utc);
-                // println!("Payment at {} (after 11:00) -> expires at {}", payment_date_naive, result);
-                result
-            };
-            return Some(("daily".to_string(), coverage_end));
+        if amount_matches(payment_amount_decimal, *amount) {
+            return Some(("daily".to_string(), daily_coverage_end(payment_date)));
         }
     }
 
-    // Check if it's a per focus payment
     for (amount, _) in PER_FOCUS_PAYMENTS {
-        if (payment_amount_decimal - amount).abs() < 0.01 {
-            // Per focus payment: coverage for 8 days from payment date
+        if amount_matches(payment_amount_decimal, *amount) {
             let coverage_end = payment_date + chrono::Duration::days(8);
             return Some(("per_focus".to_string(), coverage_end));
         }
     }
 
+    if is_fc_eligible {
+        for (amount, _) in DAILY_PAYMENTS {
+            if amount_matches(payment_amount_decimal, *amount * fc_price_factor) {
+                return Some(("daily".to_string(), daily_coverage_end(payment_date)));
+            }
+        }
+
+        for (amount, _) in PER_FOCUS_PAYMENTS {
+            if amount_matches(payment_amount_decimal, *amount * fc_price_factor) {
+                let coverage_end = payment_date + chrono::Duration::days(8);
+                return Some(("per_focus".to_string(), coverage_end));
+            }
+        }
+    }
+
+    None
+}
+
+fn is_fc_srp_role(role: &str) -> bool {
+    matches!(role, "fc" | "fc+" | "admin")
+}
+
+/// True if this character, or their linked main, has fc / fc+ / admin.
+async fn character_qualifies_for_fc_srp_discount(
+    character_name: &str,
+    db: &crate::DB,
+) -> Result<bool, Madness> {
+    let character = sqlx::query!(
+        "SELECT id FROM `character` WHERE name = ?",
+        character_name
+    )
+    .fetch_optional(db)
+    .await?;
+
+    let Some(character) = character else {
+        return Ok(false);
+    };
+
+    if let Some(admin) = sqlx::query!(
+        "SELECT role FROM admin WHERE character_id = ?",
+        character.id
+    )
+    .fetch_optional(db)
+    .await?
+    {
+        if is_fc_srp_role(&admin.role) {
+            return Ok(true);
+        }
+    }
+
+    // Alt paying: discount follows the main's FC role
+    if let Some(alt_relation) = sqlx::query!(
+        "SELECT account_id FROM alt_character WHERE alt_id = ?",
+        character.id
+    )
+    .fetch_optional(db)
+    .await?
+    {
+        if let Some(admin) = sqlx::query!(
+            "SELECT role FROM admin WHERE character_id = ?",
+            alt_relation.account_id
+        )
+        .fetch_optional(db)
+        .await?
+        {
+            if is_fc_srp_role(&admin.role) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn extract_deposit_character_name(description: &str) -> Option<String> {
+    // Format: "Character Name deposited cash into [any] account"
+    if description.contains(" deposited cash into ") {
+        let parts: Vec<&str> = description.split(" deposited cash into ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    } else if description.contains(" transferred cash from ") {
+        let parts: Vec<&str> = description.split(" transferred cash from ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    } else if description.contains(" transferred cash to ") {
+        let parts: Vec<&str> = description.split(" transferred cash to ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    }
     None
 }
 
@@ -396,6 +493,14 @@ pub async fn process_srp_payments(app: &crate::app::Application) -> Result<(), M
     let mut tx = app.get_db().begin().await?;
     let now_timestamp = now.timestamp();
     let mut paid_report_ids: Vec<i64> = Vec::new();
+    let fc_price_factor = {
+        let factor = app.config.srp_updater.fc_srp_price_factor;
+        if factor > 0.0 && factor <= 1.0 {
+            factor
+        } else {
+            0.5
+        }
+    };
 
     for entry in entries {
         // Parse the entry date
@@ -428,60 +533,37 @@ pub async fn process_srp_payments(app: &crate::app::Application) -> Result<(), M
             // println!("Processing entry: amount={} ({} millions), date={}, description={}", 
             //          entry.amount, entry.amount / 1_000_000.0, entry.date, entry.description);
             
-            // Determine if this is an SRP payment and calculate coverage
-            if let Some((coverage_type, coverage_end)) = determine_srp_coverage(entry.amount, entry_date) {
-                // println!("Found SRP payment: amount={}, type={}, coverage_end={}", entry.amount, coverage_type, coverage_end);
-                
-                // Extract character name from description
-                // Format: "Character Name deposited cash into [any] account"
-                let character_name = if entry.description.contains(" deposited cash into ") {
-                    let parts: Vec<&str> = entry.description.split(" deposited cash into ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else if entry.description.contains(" transferred cash from ") {
-                    // Handle corporate transfers - extract the sender (first character name)
-                    let parts: Vec<&str> = entry.description.split(" transferred cash from ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else if entry.description.contains(" transferred cash to ") {
-                    // Handle corporate transfers - extract the sender (first character name)
-                    let parts: Vec<&str> = entry.description.split(" transferred cash to ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else {
-                    "Unknown".to_string()
-                };
+            let Some(character_name) = extract_deposit_character_name(&entry.description) else {
+                continue;
+            };
 
-                // Only process if we got a valid character name
-                if character_name != "Unknown" {
-                    // println!("Creating SRP payment for: {} (amount: {}, expires: {})", character_name, entry.amount, coverage_end);
-                    
-                    // Insert SRP payment
-                    sqlx::query!(
-                        "INSERT INTO srp_payments (
-                            character_name, payment_amount, payment_date, expires_at, coverage_type, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)",
-                        character_name,
-                        entry.amount,
-                        entry_date.timestamp(),
-                        coverage_end.timestamp(),
-                        coverage_type,
-                        now_timestamp
-                    )
-                    .execute(&mut tx)
-                    .await?;
-                    
-                    // println!("Successfully created SRP payment for {}", character_name);
-                }
+            let is_fc_eligible =
+                character_qualifies_for_fc_srp_discount(&character_name, app.get_db()).await?;
+
+            // Determine if this is an SRP payment and calculate coverage
+            if let Some((coverage_type, coverage_end)) =
+                determine_srp_coverage(entry.amount, entry_date, is_fc_eligible, fc_price_factor)
+            {
+                // println!("Found SRP payment: amount={}, type={}, coverage_end={}, fc_discount={}", entry.amount, coverage_type, coverage_end, is_fc_eligible);
+                
+                // println!("Creating SRP payment for: {} (amount: {}, expires: {})", character_name, entry.amount, coverage_end);
+                
+                // Insert SRP payment
+                sqlx::query!(
+                    "INSERT INTO srp_payments (
+                        character_name, payment_amount, payment_date, expires_at, coverage_type, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)",
+                    character_name,
+                    entry.amount,
+                    entry_date.timestamp(),
+                    coverage_end.timestamp(),
+                    coverage_type,
+                    now_timestamp
+                )
+                .execute(&mut tx)
+                .await?;
+                
+                // println!("Successfully created SRP payment for {}", character_name);
             }
         } else if entry.amount < 0.0 {
             // Process outgoing SRP payouts (negative amounts)

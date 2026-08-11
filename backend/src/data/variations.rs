@@ -615,7 +615,9 @@ mod tests {
     }
 
     fn test_diff(from: &str, to: &str, diff: Diff) {
-        let variations = super::get()
+        let lock = super::get();
+        let guard = lock.read().unwrap();
+        let variations = guard
             .get(id_of(from))
             .expect("Missing expected variation [from]");
         let to_id = id_of(to);

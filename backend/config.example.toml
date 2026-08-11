@@ -28,6 +28,9 @@ runtime = 86400
 [srp_updater]
 enable = true
 interval_seconds = 300
+# Fraction of normal subscription SRP price FCs (fc / fc+ / admin, including alts) may pay.
+# 0.5 = 50%. Full-price deposits still count for everyone.
+fc_srp_price_factor = 0.5
 
 [incursion_updater]
 enable = true

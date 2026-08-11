@@ -1,5 +1,6 @@
 // SRP character count calculation utility
 // Based on the payment tables in backend/src/data/srp.rs
+// FC discount factor comes from config.toml (`srp_updater.fc_srp_price_factor`) via the API.
 
 // Daily payment amounts (in millions) mapped to character count
 const DAILY_PAYMENTS = [
@@ -35,31 +36,41 @@ const PER_FOCUS_PAYMENTS = [
  * Calculate the number of characters covered by an SRP payment
  * @param {number} paymentAmount - Payment amount in ISK (not millions)
  * @param {string} coverageType - Either "daily" or "per_focus"
+ * @param {number} [fcPriceFactor=0.5] - FC price factor from config.toml / API
  * @returns {number} Number of characters covered, or 0 if not a valid SRP payment
  */
-export function getCharacterCount(paymentAmount, coverageType) {
+export function getCharacterCount(paymentAmount, coverageType, fcPriceFactor = 0.5) {
   // Convert from ISK to millions for comparison
   const amountInMillions = paymentAmount / 1_000_000;
   
   // Use appropriate payment table based on coverage type
   const paymentTable = coverageType === "per_focus" ? PER_FOCUS_PAYMENTS : DAILY_PAYMENTS;
   
-  // Find matching payment amount (with small tolerance for floating point precision)
-  const matchingPayment = paymentTable.find(payment => 
+  // Full-price match first (including FCs who paid the normal amount)
+  const fullPriceMatch = paymentTable.find(payment => 
     Math.abs(payment.amount - amountInMillions) < 0.01
   );
+  if (fullPriceMatch) {
+    return fullPriceMatch.characters;
+  }
+
+  // FC discounted match (percentage of normal price)
+  const discountedMatch = paymentTable.find(payment =>
+    Math.abs(payment.amount * fcPriceFactor - amountInMillions) < 0.01
+  );
   
-  return matchingPayment ? matchingPayment.characters : 0;
+  return discountedMatch ? discountedMatch.characters : 0;
 }
 
 /**
  * Get character count display text
  * @param {number} paymentAmount - Payment amount in ISK
  * @param {string} coverageType - Either "daily" or "per_focus"
+ * @param {number} [fcPriceFactor=0.5] - FC price factor from config.toml / API
  * @returns {string} Display text for character count
  */
-export function getCharacterCountText(paymentAmount, coverageType) {
-  const count = getCharacterCount(paymentAmount, coverageType);
+export function getCharacterCountText(paymentAmount, coverageType, fcPriceFactor = 0.5) {
+  const count = getCharacterCount(paymentAmount, coverageType, fcPriceFactor);
   
   if (count === 0) {
     return "Unknown";
