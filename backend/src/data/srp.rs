@@ -1039,6 +1039,7 @@ pub async fn check_srp_status_at_time(
 pub async fn calculate_srp_appraisal(
     app: &crate::app::Application,
     destroyed_items: &[String],
+    hull_type_id: Option<i64>,
 ) -> Result<(f64, Vec<serde_json::Value>), Madness> {
     if destroyed_items.is_empty() {
         return Ok((0.0, Vec::new()));
@@ -1076,20 +1077,169 @@ pub async fn calculate_srp_appraisal(
     let appraisal_data: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| Madness::BadRequest(format!("Failed to parse Janice API response: {}", e)))?;
 
-    // Extract the total value and items from the response
-    let total_value = appraisal_data
-        .get("effectivePrices")
-        .and_then(|v| v.get("totalSellPrice"))
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| Madness::BadRequest("Invalid response format from Janice API - missing totalSellPrice".to_string()))?;
-
-    let items = appraisal_data
+    let mut items = appraisal_data
         .get("items")
         .and_then(|v| v.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_else(Vec::new);
 
+    let hull = hull_type_id.map(|id| id as eve_data_core::TypeID);
+
+    // Apply modules.yaml srp_modified overrides (market % or flat ISK) and recompute total.
+    let total_value = apply_srp_modified_price_overrides(&mut items, hull)?;
+
     Ok((total_value, items))
+}
+
+/// Adjust Janice item prices using `srp_modified` from modules.yaml, then sum totals.
+fn apply_srp_modified_price_overrides(
+    items: &mut Vec<serde_json::Value>,
+    hull: Option<eve_data_core::TypeID>,
+) -> Result<f64, Madness> {
+    let overrides = crate::data::variations::srp_modified_modules().map_err(|e| {
+        Madness::BadRequest(format!("Failed to load srp_modified config: {}", e))
+    })?;
+
+    let mut total_value = 0.0;
+
+    for item in items.iter_mut() {
+        // Janice v2 uses itemType.eid for the EVE type ID (not itemType.id).
+        let type_id = item
+            .pointer("/itemType/eid")
+            .or_else(|| item.pointer("/itemType/id"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as eve_data_core::TypeID;
+        let type_name = item
+            .pointer("/itemType/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let amount = item
+            .get("amount")
+            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+            .unwrap_or(1.0)
+            .max(0.0);
+
+        let janice_unit = item
+            .pointer("/effectivePrices/sellPrice")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let janice_total = item
+            .pointer("/effectivePrices/sellPriceTotal")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(janice_unit * amount);
+
+        let rule = overrides.get(&type_id).cloned().or_else(|| {
+            // Fallback: resolve by Janice type name if eid lookup missed.
+            if type_name.is_empty() {
+                return None;
+            }
+            eve_data_core::TypeDB::id_of(type_name)
+                .ok()
+                .and_then(|id| overrides.get(&id).cloned())
+        });
+
+        let pricing = rule.and_then(|r| {
+            if r.applies_to_hull(hull) {
+                Some(r.pricing)
+            } else {
+                None
+            }
+        });
+
+        let (sell_price, sell_total, override_meta) = match pricing {
+            Some(crate::data::variations::SrpModifiedPricing::MarketPercent(pct)) => {
+                let factor = pct / 100.0;
+                let unit = janice_unit * factor;
+                let total = janice_total * factor;
+                (
+                    unit,
+                    total,
+                    Some(serde_json::json!({
+                        "market_percent": pct,
+                        "janice_sell_price": janice_unit,
+                        "janice_sell_price_total": janice_total,
+                    })),
+                )
+            }
+            Some(crate::data::variations::SrpModifiedPricing::Flat(flat)) => {
+                let unit = flat as f64;
+                let total = unit * amount;
+                (
+                    unit,
+                    total,
+                    Some(serde_json::json!({
+                        "flat": flat,
+                        "janice_sell_price": janice_unit,
+                        "janice_sell_price_total": janice_total,
+                    })),
+                )
+            }
+            None => (janice_unit, janice_total, None),
+        };
+
+        if let Some(prices) = item.get_mut("effectivePrices") {
+            if let Some(obj) = prices.as_object_mut() {
+                obj.insert(
+                    "sellPrice".to_string(),
+                    serde_json::Value::from(sell_price),
+                );
+                obj.insert(
+                    "sellPriceTotal".to_string(),
+                    serde_json::Value::from(sell_total),
+                );
+            }
+        } else {
+            item.as_object_mut().map(|obj| {
+                obj.insert(
+                    "effectivePrices".to_string(),
+                    serde_json::json!({
+                        "sellPrice": sell_price,
+                        "sellPriceTotal": sell_total,
+                    }),
+                )
+            });
+        }
+
+        if let Some(meta) = override_meta {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("srp_override".to_string(), meta);
+            }
+        }
+
+        total_value += sell_total;
+    }
+
+    Ok(total_value)
+}
+
+#[cfg(test)]
+mod srp_modified_override_tests {
+    use super::apply_srp_modified_price_overrides;
+
+    #[test]
+    fn overrides_peace_by_eid_on_allowed_hull() {
+        let paladin = eve_data_core::TypeDB::id_of("Paladin").unwrap();
+        let mut items = vec![serde_json::json!({
+            "amount": 2,
+            "itemType": {
+                "eid": 23416,
+                "name": "'Peace' Large Remote Armor Repairer"
+            },
+            "effectivePrices": {
+                "sellPrice": 12345.0,
+                "sellPriceTotal": 24690.0
+            }
+        })];
+
+        let total =
+            apply_srp_modified_price_overrides(&mut items, Some(paladin)).expect("override apply");
+        assert_eq!(total, 2_000_000_000.0);
+        assert_eq!(
+            items[0]["effectivePrices"]["sellPrice"].as_f64().unwrap(),
+            1_000_000_000.0
+        );
+        assert_eq!(items[0]["srp_override"]["flat"].as_i64().unwrap(), 1_000_000_000);
+    }
 }
 
 pub async fn approve_srp_report(

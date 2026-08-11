@@ -144,18 +144,14 @@ impl FitDiffer {
             .collect();
         if let Some(shipvar) = amvariations.get(&actual.hull) {
             for allowed_variation in shipvar {
-                let missing_matches = allowed_variation.missing.iter().all(|(module, count)| {
-                    modules
-                        .missing
-                        .get(module)
-                        .map_or(false, |allowed_count| allowed_count == count)
-                });
-                let extra_matches = allowed_variation.extra.iter().all(|(module, count)| {
-                    modules
-                        .extra
-                        .get(module)
-                        .map_or(false, |allowed_count| allowed_count == count)
-                });
+                let missing_matches = allowed_variation
+                    .missing
+                    .iter()
+                    .all(|(module, rule)| rule.matches(modules.missing.get(module)));
+                let extra_matches = allowed_variation
+                    .extra
+                    .iter()
+                    .all(|(module, rule)| rule.matches(modules.extra.get(module)));
                 if missing_matches && extra_matches {
                     for module in allowed_variation.missing.keys() {
                         modules.missing.remove(module);

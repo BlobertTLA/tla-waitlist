@@ -275,3 +275,35 @@ fit_variation_rules:
     missing: 
       - name: Medium Remote Armor Repairer II
         amount: 1
+#some bullshit for drones
+  - hull: Nestor
+    missing: 
+      - name: "'Augmented' Ogre"
+        amount: 5
+        compare: "<="  # waive if missing 1..=5 (default compare is exact ==)
+# Exact type names that get an SRP-modified annotation when present on the fit
+# (including approved matches) or when already flagged. Does not affect auto-approval.
+# These also override Janice sell prices when calculating SRP appraisals.
+# Each entry must set exactly one of:
+#   market_percent: percent of Janice market sell (e.g. 50 = 50%)
+#   flat: fixed ISK per module (replaces Janice unit price)
+# Optional hull scoping:
+#   hulls: only apply on these ship types
+#   exclude_hulls: apply on all ships except these
+srp_modified:
+  - name: "'Peace' Large Remote Armor Repairer"
+    flat: 1000000000
+    hulls:
+      - Paladin
+  - name: "'Augmented' Ogre"
+    flat: 5000000
+  - name: "'Augmented' Hammerhead"
+    flat: 2500000
+  - name: "'Augmented' Acolyte"
+    flat: 1000000
+  - name: Heavy Armor Maintenance Bot II
+    market_percent: 100
+  - name: Heavy Shield Maintenance Bot II
+    market_percent: 100
+  - name: Heavy Hull Maintenance Bot II
+    market_percent: 100

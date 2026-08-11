@@ -894,6 +894,9 @@ async fn get_srp_report_srp_validation(
 #[derive(Debug, Deserialize)]
 struct AppraisalRequest {
     destroyed_items: Vec<String>,
+    /// Victim ship type ID from the killmail; used for hull-scoped srp_modified rules.
+    #[serde(default)]
+    hull_type_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -941,7 +944,8 @@ async fn calculate_srp_appraisal(
 ) -> Result<Json<AppraisalResponse>, Madness> {
     account.require_access("commanders-manage:admin")?;
 
-    let (total_value, items) = srp::calculate_srp_appraisal(app, &input.destroyed_items).await?;
+    let (total_value, items) =
+        srp::calculate_srp_appraisal(app, &input.destroyed_items, input.hull_type_id).await?;
 
     Ok(Json(AppraisalResponse {
         total_value,

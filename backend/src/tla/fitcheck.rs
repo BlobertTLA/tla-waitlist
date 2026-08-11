@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::fitmatch;
-use crate::data::{categories, fits::DoctrineFit, skills::Skills};
+use crate::data::{categories, fits::DoctrineFit, skills::Skills, variations};
 use eve_data_core::{FitError, Fitting, TypeDB, TypeID};
 use serde::Serialize;
 
@@ -22,6 +22,64 @@ pub struct PubAnalysis {
     extra: BTreeMap<TypeID, i64>,
     cargo_missing: BTreeMap<TypeID, i64>,
     downgraded: BTreeMap<TypeID, BTreeMap<TypeID, i64>>,
+    /// Modules from `srp_modified` in modules.yaml that are present on the fit
+    /// and/or already flagged. Informational only — does not affect approval.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    srp_modified: Vec<SrpModifiedModule>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SrpModifiedModule {
+    type_id: TypeID,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    market_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flat: Option<i64>,
+}
+
+impl PubAnalysis {
+    fn annotate_srp_modified(&mut self, fit: &Fitting) {
+        let srp_modules = match variations::srp_modified_modules() {
+            Ok(ids) => ids,
+            Err(_) => return,
+        };
+        if srp_modules.is_empty() {
+            return;
+        }
+
+        // Tag listed types that are on the fit (including approved matches) or
+        // appear in any existing flag (e.g. missing expected modules).
+        let mut candidates = BTreeSet::new();
+        candidates.extend(fit.modules.keys().copied());
+        candidates.extend(fit.cargo.keys().copied());
+        candidates.extend(self.missing.keys().copied());
+        candidates.extend(self.extra.keys().copied());
+        candidates.extend(self.cargo_missing.keys().copied());
+        for (orig, replacements) in &self.downgraded {
+            candidates.insert(*orig);
+            candidates.extend(replacements.keys().copied());
+        }
+
+        self.srp_modified = candidates
+            .into_iter()
+            .filter_map(|type_id| {
+                srp_modules.get(&type_id).and_then(|rule| {
+                    if !rule.applies_to_hull(Some(fit.hull)) {
+                        return None;
+                    }
+                    let (market_percent, flat) = match rule.pricing {
+                        variations::SrpModifiedPricing::MarketPercent(pct) => (Some(pct), None),
+                        variations::SrpModifiedPricing::Flat(amount) => (None, Some(amount)),
+                    };
+                    Some(SrpModifiedModule {
+                        type_id,
+                        market_percent,
+                        flat,
+                    })
+                })
+            })
+            .collect();
+    }
 }
 
 pub struct PilotData<'a> {
@@ -126,13 +184,16 @@ impl<'a> FitChecker<'a> {
             if !(diff.cargo_missing.is_empty() && fit_ok) {
                 self.approved = false;
             }
-            self.analysis = Some(PubAnalysis {
+            let mut analysis = PubAnalysis {
                 name: doctrine_fit.name.clone(),
                 missing: diff.module_missing,
                 extra: diff.module_extra,
                 downgraded: diff.module_downgraded,
                 cargo_missing: diff.cargo_missing,
-            });
+                srp_modified: Vec::new(),
+            };
+            analysis.annotate_srp_modified(self.fit);
+            self.analysis = Some(analysis);
         } else {
             self.approved = false;
         }
