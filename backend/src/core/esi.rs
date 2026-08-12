@@ -127,6 +127,14 @@ pub struct WarDetail {
     pub open_for_allies: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CharacterAffiliation {
+    pub character_id: i64,
+    pub corporation_id: i64,
+    pub alliance_id: Option<i64>,
+    pub faction_id: Option<i64>,
+}
+
 #[derive(Debug)]
 pub struct ESIResponse<T> {
     pub data: T,
@@ -842,6 +850,20 @@ impl ESIClient {
                 Err(e)
             }
         }
+    }
+
+    /// POST /characters/affiliation/ — resolve corp/alliance for many characters in one call.
+    pub async fn get_character_affiliations(
+        &self,
+        character_ids: &[i64],
+    ) -> Result<Vec<CharacterAffiliation>, ESIError> {
+        if character_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let url = "https://esi.evetech.net/latest/characters/affiliation/".to_string();
+        let response = self.raw.post_unauthenticated(&url, character_ids).await?;
+        Ok(response.json().await?)
     }
 
     pub async fn delete(

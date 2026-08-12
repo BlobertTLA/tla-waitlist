@@ -66,6 +66,26 @@ impl WarUpdater {
     }
 
     async fn run_once(&self) -> Result<(), Madness> {
+        // Keep in-memory cache usable even if ESI war refresh fails this cycle.
+        let _ = self.reload_cache_from_db().await;
+
+        let war_result = self.refresh_wars().await;
+        if let Err(ref e) = war_result {
+            error!("War updater: war refresh failed: {:#?}", e);
+        } else {
+            let _ = self.reload_cache_from_db().await;
+        }
+
+        // Affiliation backfill must not depend on war ESI succeeding.
+        if let Err(e) = self.refresh_fleet_affiliations().await {
+            error!("War updater: fleet affiliation refresh failed: {:#?}", e);
+            return Err(e);
+        }
+
+        war_result
+    }
+
+    async fn refresh_wars(&self) -> Result<(), Madness> {
         let bootstrap_done = self.get_meta(META_BOOTSTRAP_DONE).await?.as_deref() == Some("1");
 
         if !bootstrap_done {
@@ -74,21 +94,17 @@ impl WarUpdater {
         } else {
             self.refresh_new_and_active_wars().await?;
         }
-
-        self.reload_cache_from_db().await?;
-        self.refresh_fleet_affiliations().await?;
         Ok(())
     }
 
-    /// Refresh corporation_id for active fleet members missing affiliation data.
+    /// Refresh corporation_id for active fleet members (bulk affiliation).
+    /// Re-fetches everyone in fleet so corp/alliance changes are picked up, not only NULL corps.
     async fn refresh_fleet_affiliations(&self) -> Result<(), Madness> {
         let rows = sqlx::query(
             r#"
             SELECT DISTINCT fa.character_id
             FROM fleet_activity fa
-            LEFT JOIN `character` c ON c.id = fa.character_id
             WHERE fa.has_left = 0
-              AND (c.corporation_id IS NULL OR c.id IS NULL)
             "#,
         )
         .fetch_all(self.db.as_ref())
@@ -97,6 +113,12 @@ impl WarUpdater {
         if rows.is_empty() {
             return Ok(());
         }
+
+        let character_ids: Vec<i64> = rows.iter().map(|row| row.get("character_id")).collect();
+        println!(
+            "War updater: bulk-refreshing affiliation for {} active fleet members",
+            character_ids.len()
+        );
 
         let affiliation = crate::core::affiliation::AffiliationService::new(
             self.db.clone(),
@@ -107,16 +129,9 @@ impl WarUpdater {
             ),
         );
 
-        for row in rows {
-            let character_id: i64 = row.get("character_id");
-            if let Err(e) = affiliation.update_character_affiliation(character_id).await {
-                warn!(
-                    "War updater: failed to refresh affiliation for {}: {:#?}",
-                    character_id, e
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        affiliation
+            .update_characters_affiliation_bulk(&character_ids)
+            .await?;
 
         Ok(())
     }
