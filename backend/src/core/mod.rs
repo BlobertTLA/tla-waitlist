@@ -8,3 +8,4 @@ pub mod incursion_updater;
 pub mod skill_updater;
 pub mod srp_updater;
 pub mod sse;
+pub mod war_updater;

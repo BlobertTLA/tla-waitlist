@@ -36,6 +36,10 @@ fc_srp_price_factor = 0.5
 enable = true
 interval_seconds = 3600
 
+[war_updater]
+enable = true
+interval_seconds = 3600
+
 [janice]
 api_key = "YOUR_JANICE_API_KEY"
 

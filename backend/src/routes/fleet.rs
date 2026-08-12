@@ -166,6 +166,7 @@ struct FleetMember {
     name: Option<String>,
     ship: Hull,
     role: String,
+    at_war: bool,
 }
 
 fn strip_html_tags(text: &str) -> String {
@@ -1303,6 +1304,7 @@ async fn fleet_composition(
         crate::core::esi::fleet_members::get(&app.esi_client, fleet_id, fleet.boss_id).await?;
     let character_ids: Vec<_> = members.iter().map(|member| member.character_id).collect();
     let mut characters = crate::data::character::lookup(app.get_db(), &character_ids).await?;
+    let at_war_ids = crate::data::war::character_ids_at_war(app, &character_ids).await?;
     
     // Create a set of fleet member names (case-insensitive) for checking MOTD assignments
     let fleet_member_names: std::collections::HashSet<String> = characters
@@ -1331,6 +1333,7 @@ async fn fleet_composition(
                 name: TypeDB::name_of(member.ship_type_id).unwrap(),
             },
             role: member.role.clone(),
+            at_war: at_war_ids.contains(&member.character_id),
         });
     let wings = wings_info
         .into_iter()
@@ -1347,6 +1350,7 @@ async fn fleet_composition(
                         name: TypeDB::name_of(member.ship_type_id).unwrap(),
                     },
                     role: member.role.clone(),
+                    at_war: at_war_ids.contains(&member.character_id),
                 }),
             name: info_wing.name,
 
@@ -1365,6 +1369,7 @@ async fn fleet_composition(
                                 name: TypeDB::name_of(member.ship_type_id).unwrap(),
                             },
                             role: member.role.clone(),
+                            at_war: at_war_ids.contains(&member.character_id),
                         })
                         .collect();
 

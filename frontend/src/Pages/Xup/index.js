@@ -59,7 +59,7 @@ const WaitlistWrap = styled.div`
 `;
 
 async function xUp({ character, eft, toastContext, waitlist_id, alt, messagexup }) {
-  await apiCall("/api/waitlist/xup", {
+  const result = await apiCall("/api/waitlist/xup", {
     json: {
       eft: eft,
       character_id: character,
@@ -74,6 +74,16 @@ async function xUp({ character, eft, toastContext, waitlist_id, alt, messagexup 
     message: "Your X has been added to the waitlist!",
     variant: "success",
   });
+
+  if (result && Array.isArray(result.warnings)) {
+    for (const warning of result.warnings) {
+      addToast(toastContext, {
+        title: "Warning",
+        message: warning,
+        variant: "warning",
+      });
+    }
+  }
 
   if (window.Notification) {
     Notification.requestPermission();

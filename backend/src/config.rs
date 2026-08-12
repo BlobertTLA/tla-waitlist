@@ -60,6 +60,12 @@ pub struct IncursionUpdaterConfig {
 }
 
 #[derive(Deserialize, Clone)]
+pub struct WarUpdaterConfig {
+    pub enable: bool,
+    pub interval_seconds: u64,
+}
+
+#[derive(Deserialize, Clone)]
 pub struct JaniceConfig {
     pub api_key: String,
 }
@@ -82,6 +88,7 @@ pub struct Config {
     pub skill_updater: SkillUpdaterConfig,
     pub srp_updater: SRPUpdaterConfig,
     pub incursion_updater: IncursionUpdaterConfig,
+    pub war_updater: WarUpdaterConfig,
     pub janice: JaniceConfig,
     pub discord: DiscordConfig,
 }

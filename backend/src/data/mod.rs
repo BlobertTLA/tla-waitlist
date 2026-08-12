@@ -13,6 +13,7 @@ pub mod srp;
 pub mod srp_notify;
 pub mod tags;
 pub mod variations;
+pub mod war;
 pub mod yamlhelper;
 
 #[macro_export]

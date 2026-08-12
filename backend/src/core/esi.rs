@@ -100,6 +100,33 @@ pub struct KillmailData {
     pub war_id: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WarEntity {
+    pub corporation_id: Option<i64>,
+    pub alliance_id: Option<i64>,
+    #[serde(default)]
+    pub isk_destroyed: Option<f64>,
+    #[serde(default)]
+    pub ships_killed: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WarDetail {
+    pub id: i64,
+    pub aggressor: WarEntity,
+    pub defender: WarEntity,
+    #[serde(default)]
+    pub allies: Vec<WarEntity>,
+    pub finished: Option<String>,
+    pub declared: Option<String>,
+    pub started: Option<String>,
+    pub retracted: Option<String>,
+    #[serde(default)]
+    pub mutual: bool,
+    #[serde(default)]
+    pub open_for_allies: bool,
+}
+
 #[derive(Debug)]
 pub struct ESIResponse<T> {
     pub data: T,
@@ -357,6 +384,35 @@ impl ESIRawClient {
 
     pub async fn get_unauthenticated(&self, url: &str) -> Result<reqwest::Response, ESIError> {
         Ok(self.http.get(url).send().await?.error_for_status()?)
+    }
+
+    pub async fn get_unauthenticated_with_etag(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+    ) -> Result<reqwest::Response, ESIError> {
+        let mut request = self.http.get(url);
+
+        if let Some(etag) = etag {
+            request = request.header("If-None-Match", format!("\"{}\"", etag));
+        }
+
+        let response = request.send().await?;
+
+        if response.status() == 304 {
+            return Ok(response);
+        }
+
+        if let Err(err) = response.error_for_status_ref() {
+            let status = err.status().unwrap().as_u16();
+            let response_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "No response body".to_string());
+            return Err(ESIError::WithMessage(status, response_body));
+        }
+
+        Ok(response)
     }
 
     pub async fn delete(
@@ -665,6 +721,56 @@ impl ESIClient {
     ) -> Result<D, ESIError> {
         let url = format!("https://esi.evetech.net{}", path);
         Ok(self.raw.get_unauthenticated(&url).await?.json().await?)
+    }
+
+    pub async fn get_unauthenticated_with_etag<D: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<ESIResponse<Option<D>>, ESIError> {
+        let url = format!("https://esi.evetech.net{}", path);
+        let response = self
+            .raw
+            .get_unauthenticated_with_etag(&url, etag)
+            .await?;
+
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.trim_matches('"').to_string());
+
+        if response.status() == 304 {
+            return Ok(ESIResponse { data: None, etag });
+        }
+
+        let data = response.json().await?;
+        Ok(ESIResponse {
+            data: Some(data),
+            etag,
+        })
+    }
+
+    pub async fn get_wars(&self, etag: Option<&str>) -> Result<ESIResponse<Option<Vec<i64>>>, ESIError> {
+        self.get_unauthenticated_with_etag("/latest/wars/", etag)
+            .await
+    }
+
+    pub async fn get_wars_page(
+        &self,
+        max_war_id: i64,
+    ) -> Result<Vec<i64>, ESIError> {
+        self.get_unauthenticated(&format!("/latest/wars/?max_war_id={}", max_war_id))
+            .await
+    }
+
+    pub async fn get_war(
+        &self,
+        war_id: i64,
+        etag: Option<&str>,
+    ) -> Result<ESIResponse<Option<WarDetail>>, ESIError> {
+        self.get_unauthenticated_with_etag(&format!("/latest/wars/{}/", war_id), etag)
+            .await
     }
 
     pub async fn get_incursions(&self) -> Result<Vec<Incursion>, ESIError> {

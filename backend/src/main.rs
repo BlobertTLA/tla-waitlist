@@ -56,6 +56,7 @@ async fn main() {
         .await
         .unwrap();
     let database = Arc::new(database);
+    let war_cache = data::war::new_shared_cache();
 
     if config.fleet_updater.enable {
         let fleet_updater =
@@ -79,7 +80,16 @@ async fn main() {
         incursion_updater.start();
     }
 
-    let application = app::new(database, config);
+    if config.war_updater.enable {
+        let war_updater = core::war_updater::WarUpdater::new(
+            database.clone(),
+            config.clone(),
+            war_cache.clone(),
+        );
+        war_updater.start();
+    }
+
+    let application = app::new(database, config, war_cache);
     rocket::build()
         .register("/", catchers![not_authorized, forbidden, not_found])
         .mount("/", routes::routes())
