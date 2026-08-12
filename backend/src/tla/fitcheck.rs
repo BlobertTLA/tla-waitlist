@@ -330,6 +330,9 @@ impl<'a> FitChecker<'a> {
             if self.badges.contains(&String::from("DPS")) {
                 self.tags.insert("DPS");
             }
+            if self.badges.contains(&String::from("VINDI")) {
+                self.tags.insert("VINDI");
+            }
         }
     }
 

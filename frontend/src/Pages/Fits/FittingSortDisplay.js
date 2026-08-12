@@ -230,18 +230,22 @@ function ShipDisplay({ fit, id, note }) {
   );
 }
 
-function ImplantOut() {
+function ImplantOut({ implants }) {
+  const sets = implants && implants.length > 0 ? implants : [];
   return (
     <>
       <DisplayDOM style={{ justifyContent: "initial" }}>
-        <ImplantButton name="Implants" img={wbadge} />
+        {sets.map((implantSet) => (
+          <ImplantButton key={implantSet.name} implantSet={implantSet} img={wbadge} />
+        ))}
       </DisplayDOM>
     </>
   );
 }
 
-function ImplantButton({ name, img }) {
+function ImplantButton({ implantSet, img }) {
   const [modalOpen, setModalOpen] = React.useState(false);
+  const name = implantSet.name;
   return (
     <>
       {modalOpen ? (
@@ -257,7 +261,7 @@ function ImplantButton({ name, img }) {
             </BadgeModal>
             <br />
             <br />
-            <ImplantTable type={name} />
+            <ImplantTable implantSet={implantSet} />
           </Box>
         </Modal>
       ) : null}

@@ -42,7 +42,7 @@ function FitsDisplay({ tier, setTier = null }) {
           </InputGroup>
         </Buttons>
       )}
-      <ImplantOut />
+      <ImplantOut implants={fitData.implants} />
       {tier === "Armor" ? (
         <Fitout data={fitData} tier="Armor" />
       ) : tier === "Shield" ? (
