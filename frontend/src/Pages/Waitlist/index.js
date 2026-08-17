@@ -250,7 +250,11 @@ export function Waitlist() {
               SRP: {srpStatus.status}
               {srpStatus.payment_amount && srpStatus.coverage_type && (
                 <span style={{ marginLeft: "0.5em", fontSize: "0.8em", opacity: "0.9" }}>
-                  ({getCharacterCountText(srpStatus.payment_amount, srpStatus.coverage_type)})
+                  ({getCharacterCountText(
+                    srpStatus.payment_amount,
+                    srpStatus.coverage_type,
+                    srpStatus.fc_srp_price_factor
+                  )})
                 </span>
               )}
             </Button>

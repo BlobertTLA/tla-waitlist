@@ -43,10 +43,24 @@ pub struct SkillUpdaterConfig {
 pub struct SRPUpdaterConfig {
     pub enable: bool,
     pub interval_seconds: u64,
+    /// Fraction of normal subscription SRP price that FCs (fc / fc+ / admin) may pay.
+    /// 0.5 = 50%. Full-price deposits still count for everyone.
+    #[serde(default = "default_fc_srp_price_factor")]
+    pub fc_srp_price_factor: f64,
+}
+
+fn default_fc_srp_price_factor() -> f64 {
+    0.5
 }
 
 #[derive(Deserialize, Clone)]
 pub struct IncursionUpdaterConfig {
+    pub enable: bool,
+    pub interval_seconds: u64,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct WarUpdaterConfig {
     pub enable: bool,
     pub interval_seconds: u64,
 }
@@ -74,6 +88,7 @@ pub struct Config {
     pub skill_updater: SkillUpdaterConfig,
     pub srp_updater: SRPUpdaterConfig,
     pub incursion_updater: IncursionUpdaterConfig,
+    pub war_updater: WarUpdaterConfig,
     pub janice: JaniceConfig,
     pub discord: DiscordConfig,
 }

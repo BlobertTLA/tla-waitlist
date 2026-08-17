@@ -248,6 +248,7 @@ export function SRPReportDetail() {
           },
           body: JSON.stringify({
             destroyed_items: itemsToAppraise,
+            hull_type_id: killmailData.victim.ship_type_id,
           }),
         });
 
@@ -1287,6 +1288,9 @@ export function SRPReportDetail() {
                       <div style={{ fontSize: "0.9em", color: "#6c757d", marginTop: "0.5em" }}>
                         Items Appraised: {appraisalResult.item_count} | Based on Jita 4-4 market
                         prices
+                        {appraisalResult.items?.some((item) => item.srp_override)
+                          ? " (with srp_modified overrides)"
+                          : ""}
                       </div>
                       <div style={{ marginTop: "1em" }}>
                         <button
@@ -1364,7 +1368,7 @@ export function SRPReportDetail() {
                             <div style={{ display: "flex", alignItems: "center", flex: 1 }}>
                               <img
                                 src={`https://images.evetech.net/types/${
-                                  item.itemType?.id || 0
+                                  item.itemType?.eid || item.itemType?.id || 0
                                 }/icon?size=32`}
                                 style={{
                                   width: "32px",
@@ -1376,7 +1380,7 @@ export function SRPReportDetail() {
                                 onError={(e) => {
                                   e.target.onerror = null;
                                   e.target.src = `https://images.evetech.net/types/${
-                                    item.itemType?.id || 0
+                                    item.itemType?.eid || item.itemType?.id || 0
                                   }/bp?size=32`;
                                 }}
                               />
@@ -1397,6 +1401,28 @@ export function SRPReportDetail() {
                               <div style={{ fontSize: "0.85em", color: "#495057" }}>
                                 {formatNumber(item.effectivePrices?.sellPrice || 0)} each
                               </div>
+                              {item.srp_override && (
+                                <div
+                                  style={{
+                                    fontSize: "0.75em",
+                                    color: "#856404",
+                                    marginTop: "0.25em",
+                                  }}
+                                  title={
+                                    item.srp_override.flat != null
+                                      ? `Janice was ${formatNumber(
+                                          item.srp_override.janice_sell_price_total || 0
+                                        )} ISK`
+                                      : `Janice was ${formatNumber(
+                                          item.srp_override.janice_sell_price_total || 0
+                                        )} ISK`
+                                  }
+                                >
+                                  {item.srp_override.flat != null
+                                    ? `SRP override: ${formatNumber(item.srp_override.flat)} flat`
+                                    : `SRP override: ${item.srp_override.market_percent}% market`}
+                                </div>
+                              )}
                             </div>
                           </div>
                         ))}

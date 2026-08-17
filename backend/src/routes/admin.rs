@@ -81,7 +81,7 @@ fn list_data_files(account: AuthenticatedAccount) -> Result<Json<DataFilesListRe
             if matches!(
                 filename,
                 "skills.yaml" | "categories.yaml" | "modules.yaml" | "tags.yaml" | 
-                "fits.dat" | "fitnotes.yaml" | "skillplan.yaml"
+                "fits.dat" | "fitnotes.yaml" | "implants.yaml" | "skillplan.yaml"
             ) {
                 if let Some(info) = get_file_info(filename) {
                     files.push(info);
@@ -144,7 +144,7 @@ fn get_data_file(account: AuthenticatedAccount, filename: String) -> Result<Stri
     if !matches!(
         filename.as_str(),
         "skills.yaml" | "categories.yaml" | "modules.yaml" | "tags.yaml" | 
-        "fits.dat" | "fitnotes.yaml" | "skillplan.yaml"
+        "fits.dat" | "fitnotes.yaml" | "implants.yaml" | "skillplan.yaml"
     ) {
         return Err(Madness::BadRequest("File not editable".to_string()));
     }
@@ -194,7 +194,7 @@ fn save_data_file(
     if !matches!(
         filename.as_str(),
         "skills.yaml" | "categories.yaml" | "modules.yaml" | "tags.yaml" | 
-        "fits.dat" | "fitnotes.yaml" | "skillplan.yaml"
+        "fits.dat" | "fitnotes.yaml" | "implants.yaml" | "skillplan.yaml"
     ) {
         return Err(Madness::BadRequest("File not editable".to_string()));
     }
@@ -236,6 +236,9 @@ fn save_data_file(
         }
         "fitnotes.yaml" => {
             crate::routes::fittings::fitnotes::save_fitnotes_to_file(&content)?;
+        }
+        "implants.yaml" => {
+            crate::routes::fittings::implants::save_implants_to_file(&content)?;
         }
         "skillplan.yaml" => {
             crate::data::skillplans::save_plans_from_raw_yaml(&content)?;
@@ -295,7 +298,7 @@ fn reload_data_file(account: AuthenticatedAccount, filename: String) -> Result<&
         "fits.dat" => {
             crate::data::fits::reload_fits()?;
         }
-        "fitnotes.yaml" | "skillplan.yaml" => {
+        "fitnotes.yaml" | "implants.yaml" | "skillplan.yaml" => {
             return Err(Madness::BadRequest("File does not require reload".to_string()));
         }
         _ => return Err(Madness::BadRequest("Unknown file type".to_string())),

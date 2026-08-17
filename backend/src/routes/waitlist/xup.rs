@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use rocket::serde::json::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     app::Application,
     core::auth::{authorize_character, AuthenticatedAccount},
-    data::{implants, skills},
+    data::{implants, skills, war},
     tla,
     util::madness::Madness,
 };
@@ -31,7 +31,15 @@ struct XupRequest {
     dna: Vec<DnaXup>,
 }
 
+#[derive(Debug, Serialize)]
+struct XupResponse {
+    status: &'static str,
+    warnings: Vec<String>,
+}
+
 const MAX_X_PER_ACCOUNT: usize = 10;
+const WAR_WARNING: &str =
+    "Your corporation or alliance is at war. You may still x-up Bastion/Other, but Logistics is blocked.";
 
 async fn dedup_implants(db: &mut crate::DBTX<'_>, implants: &[TypeID]) -> Result<i64, sqlx::Error> {
     let mut implants = Vec::from(implants);
@@ -91,9 +99,10 @@ async fn xup_multi(
     xups: Vec<(i64, Fitting)>,
     is_alt: bool,
     messagexup: &String,
-) -> Result<(), Madness> {
+) -> Result<Vec<String>, Madness> {
     // Track the "now" from the start of the operation, to keep things fair
     let now = chrono::Utc::now().timestamp();
+    let mut warnings = Vec::new();
 
     // Input sanity
     if xups.is_empty() {
@@ -126,6 +135,7 @@ async fn xup_multi(
 
     // Check permissions/bans on all characters, and get ESI info
     let mut character_info = HashMap::new();
+    let mut character_at_war = HashMap::new();
     for character_id in character_ids {
         authorize_character(app.get_db(), &account, character_id, None).await?;
 
@@ -147,10 +157,13 @@ async fn xup_multi(
             return Err(Madness::BadRequest(err.to_string()));
         }
 
+        let at_war = war::character_is_at_war(app, character_id).await?;
+        character_at_war.insert(character_id, at_war);
+
         let time_in_fleet = get_time_in_fleet(app.get_db(), character_id).await?;
-        
+
         let implants = implants::get_implants(app, character_id).await?;
-        
+
         let skills = skills::load_skills(&app.esi_client, app.get_db(), character_id).await?;
 
         character_info.insert(character_id, (time_in_fleet, implants, skills));
@@ -240,7 +253,28 @@ async fn xup_multi(
             return Err(Madness::BadRequest(error));
         }
 
-        let tags = fit_checked.tags.join(",");
+        let at_war = *character_at_war.get(&character_id).unwrap_or(&false);
+        if at_war && fit_checked.category == "logi" {
+            return Err(Madness::BadRequest(
+                "You cannot x-up Logistics while your corporation or alliance is at war."
+                    .to_string(),
+            ));
+        }
+
+        let mut approved = fit_checked.approved;
+        let mut tag_list: Vec<String> = fit_checked
+            .tags
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect();
+        if at_war {
+            approved = false;
+            tag_list.push("AT-WAR".to_string());
+            if !warnings.iter().any(|w| w == WAR_WARNING) {
+                warnings.push(WAR_WARNING.to_string());
+            }
+        }
+        let tags = tag_list.join(",");
         let fit_analysis: Option<String> = fit_checked
             .analysis
             .map(|f| serde_json::to_string(&f).unwrap());
@@ -249,7 +283,7 @@ async fn xup_multi(
         sqlx::query!("
             INSERT INTO waitlist_entry_fit (character_id, entry_id, fit_id, category, approved, tags, implant_set_id, fit_analysis, cached_time_in_fleet, is_alt, messagexup)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
-        ", character_id, entry_id, fit_id, fit_checked.category, fit_checked.approved, tags, implant_set_id, fit_analysis, this_pilot_data.time_in_fleet, is_alt, messagexup)
+        ", character_id, entry_id, fit_id, fit_checked.category, approved, tags, implant_set_id, fit_analysis, this_pilot_data.time_in_fleet, is_alt, messagexup)
         .execute(&mut tx).await?;
 
         // Log the x'up
@@ -265,7 +299,7 @@ async fn xup_multi(
     // Let people and listeners know what just happened
     super::notify::notify_waitlist_update_and_xup(app, waitlist_id).await?;
 
-    Ok(())
+    Ok(warnings)
 }
 
 #[post("/api/waitlist/xup", data = "<input>")]
@@ -273,7 +307,7 @@ async fn xup(
     app: &rocket::State<Application>,
     account: AuthenticatedAccount,
     input: Json<XupRequest>,
-) -> Result<&'static str, Madness> {
+) -> Result<Json<XupResponse>, Madness> {
     // Character authorization is done by xup_multi!
 
     // EFT x'es
@@ -289,7 +323,7 @@ async fn xup(
         xups.push((dna_xup.character_id, fit));
     }
 
-    xup_multi(
+    let warnings = xup_multi(
         app,
         account,
         input.waitlist_id,
@@ -299,7 +333,10 @@ async fn xup(
     )
     .await?;
 
-    Ok("OK")
+    Ok(Json(XupResponse {
+        status: "ok",
+        warnings,
+    }))
 }
 
 pub fn routes() -> Vec<rocket::Route> {

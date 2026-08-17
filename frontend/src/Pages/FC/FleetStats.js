@@ -189,6 +189,11 @@ function SquadMembers({ members, warnActive, onCharacterRightClick }) {
             >
               {member.name}{" "}
             </NavLink>
+            {member.at_war && (
+              <span style={{ color: "red", fontWeight: "bold", marginLeft: "4px" }} title="At war">
+                WAR
+              </span>
+            )}
           </CellTight>
           <CellTight>{member.ship.name}</CellTight>
           <CellTight>

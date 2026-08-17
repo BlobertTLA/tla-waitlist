@@ -105,6 +105,7 @@ export const icons = {
   LOGI: { type: "shield", color: "red", letter: "L", name: "Logi Specialist" },
   ALT: { type: "shield", color: "green", letter: "A", name: "Alt approved" },
   VINDI: { type: "shield", color: "blue", letter: "!", name: "Vindication" },
+  // Soft flags like AT-WAR / DPS-HOURS-REACHED are not here — XCard shows them as text badges
   // Other
 
   UNKNOWN: { type: "shield", color: "neutral", letter: "?", name: null },

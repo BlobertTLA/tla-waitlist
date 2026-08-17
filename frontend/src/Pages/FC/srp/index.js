@@ -504,7 +504,11 @@ export function SRP() {
                           <Cell>{payment.character_name}</Cell>
                           <Cell>{formatNumber(payment.payment_amount)} ISK</Cell>
                           <Cell>
-                            {getCharacterCountText(payment.payment_amount, payment.coverage_type)}
+                            {getCharacterCountText(
+                              payment.payment_amount,
+                              payment.coverage_type,
+                              allStatuses.fc_srp_price_factor
+                            )}
                           </Cell>
                           <Cell>{formatDatetime(new Date(payment.payment_date * 1000))}</Cell>
                           <Cell>

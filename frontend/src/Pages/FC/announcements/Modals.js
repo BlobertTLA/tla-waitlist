@@ -35,32 +35,26 @@ const PAGE_CHECKBOX_STYLES = {
   display: "inline-block",
 };
 
-const PageFilters = ({ idPrefix = "", selectedFilters, onChange }) => {
-  const [values, setValues] = React.useState([]);
-
-  useEffect(() => {
-    if (selectedFilters !== values) {
-      setValues(selectedFilters ?? []);
-    }
-  }, [selectedFilters, values]);
+const PageFilters = ({ idPrefix = "", selectedFilters = [], onChange }) => {
+  const values = selectedFilters ?? [];
 
   const handleClick = (e) => {
-    const chckbox = e.target;
-    let valueArray = values;
+    const checkbox = e.target;
+    // Strip optional prefix so stored page ids stay stable ("fits", not "12-fits")
+    const pageId = idPrefix
+      ? checkbox.id.replace(new RegExp(`^${idPrefix}-`), "")
+      : checkbox.id;
+    let nextValues = [...values];
 
-    // If the target checkbox was ticked add it to the array
-    if (chckbox.checked && !valueArray.includes(chckbox.id)) {
-      valueArray.push(chckbox.id);
+    if (checkbox.checked && !nextValues.includes(pageId)) {
+      nextValues.push(pageId);
     }
 
-    // If the target checkbox was unticked remove it from the array
-    if (!chckbox.checked && valueArray.includes(chckbox.id)) {
-      let indexOf = valueArray.indexOf(chckbox.id);
-      valueArray.splice(indexOf, 1);
+    if (!checkbox.checked && nextValues.includes(pageId)) {
+      nextValues = nextValues.filter((id) => id !== pageId);
     }
 
-    setValues([...valueArray]);
-    onChange(valueArray);
+    onChange(nextValues);
   };
 
   return (
@@ -68,12 +62,13 @@ const PageFilters = ({ idPrefix = "", selectedFilters, onChange }) => {
       <Label>Display on: (leave blank for site-wide)</Label>
 
       {options.map((option, key) => {
-        const id = option.name.toLowerCase();
-        const is_checked = values.includes(id);
+        const pageId = option.name.toLowerCase();
+        const id = idPrefix ? `${idPrefix}-${pageId}` : pageId;
+        const is_checked = values.includes(pageId);
 
         return (
           <label key={key} htmlFor={id} style={PAGE_CHECKBOX_STYLES}>
-            <input id={id} type="checkbox" checked={is_checked} onChange={(e) => handleClick(e)} />{" "}
+            <input id={id} type="checkbox" checked={is_checked} onChange={handleClick} />{" "}
             {option.name}
           </label>
         );
@@ -93,6 +88,7 @@ const AddAnnouncement = ({ isOpen, setOpen, refreshFunction }) => {
   const resetInputs = () => {
     setAlert(false);
     setContent(undefined);
+    setPageFilters([]);
   };
 
   const onSubmit = (e) => {
@@ -171,7 +167,7 @@ const AddAnnouncement = ({ isOpen, setOpen, refreshFunction }) => {
             </label>
           </FormGroup>
 
-          <PageFilters onChange={(e) => setPageFilters(e)} />
+          <PageFilters selectedFilters={pageFilters} onChange={setPageFilters} />
 
           <FormGroup>
             <Label>or select a template</Label>
@@ -247,7 +243,8 @@ const UpdateAnnouncement = ({ data, refreshFunction }) => {
     useEffect(() => {
       setContent(data?.message);
       setAlert(data?.is_alert);
-    }, [data?.message, data?.is_alert]);
+      setPageFilters(data?.pages ? JSON.parse(data.pages) : []);
+    }, [data?.message, data?.is_alert, data?.pages]);
 
     return (
       <Modal open={isOpen} setOpen={setOpen}>
@@ -289,8 +286,8 @@ const UpdateAnnouncement = ({ data, refreshFunction }) => {
 
             <PageFilters
               idPrefix={data.id}
-              selectedFilters={data?.pages ? JSON.parse(data.pages) : []}
-              onChange={(e) => setPageFilters(e)}
+              selectedFilters={pageFilters}
+              onChange={setPageFilters}
             />
 
             <Buttons style={{ paddingLeft: "8px" }}>

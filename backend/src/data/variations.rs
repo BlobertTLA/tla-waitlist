@@ -61,6 +61,77 @@ struct ModuleFile {
 struct ModuleString {
     name: String,
     amount: i64,
+    /// Optional count comparison for fit_variation_rules only.
+    /// Accepts: ==, eq, <=, lte, >=, gte, <, lt, >, gt. Default: exact (==).
+    #[serde(default)]
+    compare: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountCompare {
+    Eq,
+    Lte,
+    Gte,
+    Lt,
+    Gt,
+}
+
+impl CountCompare {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("==") | Some("eq") | Some("=") => Self::Eq,
+            Some("<=") | Some("lte") | Some("max") => Self::Lte,
+            Some(">=") | Some("gte") | Some("min") => Self::Gte,
+            Some("<") | Some("lt") => Self::Lt,
+            Some(">") | Some("gt") => Self::Gt,
+            Some(other) => panic!(
+                "fit_variation_rules compare '{}' invalid; use ==, <=, >=, <, or >",
+                other
+            ),
+        }
+    }
+
+    pub fn matches(self, actual: i64, amount: i64) -> bool {
+        match self {
+            Self::Eq => actual == amount,
+            Self::Lte => actual <= amount,
+            Self::Gte => actual >= amount,
+            Self::Lt => actual < amount,
+            Self::Gt => actual > amount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VariationCount {
+    pub amount: i64,
+    pub compare: CountCompare,
+}
+
+impl VariationCount {
+    /// Exact (==) match — used by existing rules that omit `compare`.
+    pub fn exact(amount: i64) -> Self {
+        Self {
+            amount,
+            compare: CountCompare::Eq,
+        }
+    }
+
+    pub fn matches(&self, actual: Option<&i64>) -> bool {
+        match self.compare {
+            // Exact keeps prior behavior: the module must appear in the diff.
+            CountCompare::Eq => match actual {
+                Some(count) => self.compare.matches(*count, self.amount),
+                None => false,
+            },
+            // Inequality treats a missing entry as count 0 so multi-item
+            // "optional up to N" rules can AND together cleanly.
+            _ => {
+                let count = actual.copied().unwrap_or(0);
+                self.compare.matches(count, self.amount)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -281,10 +352,10 @@ struct FitVariationRules {
     fit_variation_rules: Vec<FitVariationRule>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ModuleVariation {
-    pub missing: BTreeMap<TypeID, i64>,
-    pub extra: BTreeMap<TypeID, i64>,
+    pub missing: BTreeMap<TypeID, VariationCount>,
+    pub extra: BTreeMap<TypeID, VariationCount>,
 }
 
 pub fn fit_module_variations() -> Result<BTreeMap<TypeID, Vec<ModuleVariation>>, TypeError> {
@@ -292,18 +363,30 @@ pub fn fit_module_variations() -> Result<BTreeMap<TypeID, Vec<ModuleVariation>>,
     let mut hull_variations = BTreeMap::<TypeID, Vec<ModuleVariation>>::new();
 
     for rule in &data.fit_variation_rules {
-        let mut missing = BTreeMap::<TypeID, i64>::new();
-        let mut extra = BTreeMap::<TypeID, i64>::new();
+        let mut missing = BTreeMap::<TypeID, VariationCount>::new();
+        let mut extra = BTreeMap::<TypeID, VariationCount>::new();
 
         if let Some(item) = &rule.missing {
             for module in item {
-                missing.insert(TypeDB::id_of(&module.name)?, module.amount);
+                missing.insert(
+                    TypeDB::id_of(&module.name)?,
+                    VariationCount {
+                        amount: module.amount,
+                        compare: CountCompare::parse(module.compare.as_deref()),
+                    },
+                );
             }
         }
 
         if let Some(item) = &rule.extra {
             for module in item {
-                extra.insert(TypeDB::id_of(&module.name)?, module.amount);
+                extra.insert(
+                    TypeDB::id_of(&module.name)?,
+                    VariationCount {
+                        amount: module.amount,
+                        compare: CountCompare::parse(module.compare.as_deref()),
+                    },
+                );
             }
         }
         let hull_id = TypeDB::id_of(&rule.hull)?;
@@ -324,6 +407,104 @@ pub fn fit_module_variations() -> Result<BTreeMap<TypeID, Vec<ModuleVariation>>,
     }
 
     Ok(hull_variations)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ModuleFileSrpModified {
+    #[serde(default)]
+    srp_modified: Vec<SrpModifiedYamlEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SrpModifiedYamlEntry {
+    name: String,
+    /// Percent of market sell value (e.g. 50 = 50%). Mutually exclusive with `flat`.
+    #[serde(default)]
+    market_percent: Option<f64>,
+    /// Flat ISK value per module. Mutually exclusive with `market_percent`.
+    #[serde(default)]
+    flat: Option<i64>,
+    /// If non-empty, override only applies when the lost ship is one of these hulls.
+    #[serde(default)]
+    hulls: Vec<String>,
+    /// If non-empty, override is skipped when the lost ship is one of these hulls.
+    #[serde(default)]
+    exclude_hulls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SrpModifiedPricing {
+    MarketPercent(f64),
+    Flat(i64),
+}
+
+#[derive(Debug, Clone)]
+pub struct SrpModifiedRule {
+    pub pricing: SrpModifiedPricing,
+    /// Empty = any hull (unless excluded).
+    pub hulls: BTreeSet<TypeID>,
+    pub exclude_hulls: BTreeSet<TypeID>,
+}
+
+impl SrpModifiedRule {
+    /// Whether this rule applies for the given victim hull.
+    /// If `hull` is unknown and the rule is hull-restricted, it does not apply.
+    pub fn applies_to_hull(&self, hull: Option<TypeID>) -> bool {
+        match hull {
+            None => self.hulls.is_empty() && self.exclude_hulls.is_empty(),
+            Some(h) => {
+                if !self.hulls.is_empty() && !self.hulls.contains(&h) {
+                    return false;
+                }
+                if self.exclude_hulls.contains(&h) {
+                    return false;
+                }
+                true
+            }
+        }
+    }
+}
+
+/// Exact type names → pricing/hull rules for `srp_modified` annotations and Janice overrides.
+/// Does not affect fit auto-approval.
+pub fn srp_modified_modules() -> Result<BTreeMap<TypeID, SrpModifiedRule>, TypeError> {
+    let data: ModuleFileSrpModified = yamlhelper::from_file("./data/modules.yaml");
+    let mut map = BTreeMap::new();
+    for entry in &data.srp_modified {
+        let pricing = match (entry.market_percent, entry.flat) {
+            (Some(pct), None) => SrpModifiedPricing::MarketPercent(pct),
+            (None, Some(flat)) => SrpModifiedPricing::Flat(flat),
+            (Some(_), Some(_)) => {
+                panic!(
+                    "srp_modified entry '{}' must set only one of market_percent or flat",
+                    entry.name
+                );
+            }
+            (None, None) => {
+                panic!(
+                    "srp_modified entry '{}' must set market_percent or flat",
+                    entry.name
+                );
+            }
+        };
+        let mut hulls = BTreeSet::new();
+        for hull_name in &entry.hulls {
+            hulls.insert(TypeDB::id_of(hull_name)?);
+        }
+        let mut exclude_hulls = BTreeSet::new();
+        for hull_name in &entry.exclude_hulls {
+            exclude_hulls.insert(TypeDB::id_of(hull_name)?);
+        }
+        map.insert(
+            TypeDB::id_of(&entry.name)?,
+            SrpModifiedRule {
+                pricing,
+                hulls,
+                exclude_hulls,
+            },
+        );
+    }
+    Ok(map)
 }
 
 pub fn get() -> Arc<RwLock<Variator>> {
@@ -434,7 +615,9 @@ mod tests {
     }
 
     fn test_diff(from: &str, to: &str, diff: Diff) {
-        let variations = super::get()
+        let lock = super::get();
+        let guard = lock.read().unwrap();
+        let variations = guard
             .get(id_of(from))
             .expect("Missing expected variation [from]");
         let to_id = id_of(to);

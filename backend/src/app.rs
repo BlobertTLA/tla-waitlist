@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::data::war::SharedWarCache;
 use std::sync::Arc;
 
 pub struct Application {
@@ -10,9 +11,10 @@ pub struct Application {
     pub sse_client: crate::core::sse::SSEClient,
     pub discord_client: crate::core::discord::DiscordWebhookClient,
     pub token_secret: Vec<u8>,
+    pub war_cache: SharedWarCache,
 }
 
-pub fn new(db: Arc<crate::DB>, config: Config) -> Application {
+pub fn new(db: Arc<crate::DB>, config: Config, war_cache: SharedWarCache) -> Application {
     Application {
         affiliation_service: crate::core::affiliation::AffiliationService::new(
             db.clone(),
@@ -36,6 +38,7 @@ pub fn new(db: Arc<crate::DB>, config: Config) -> Application {
         token_secret: hex::decode(&config.app.token_secret).unwrap(),
         db,
         config,
+        war_cache,
     }
 }
 

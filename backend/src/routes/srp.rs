@@ -18,6 +18,8 @@ struct SRPStatusResponse {
     status: Option<String>,
     payment_amount: Option<f64>,
     coverage_type: Option<String>,
+    /// Fraction of normal subscription price FCs may pay (from config.toml).
+    fc_srp_price_factor: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +47,8 @@ struct UpdateSRPConfigRequest {
 #[derive(Debug, Serialize)]
 struct AllSRPStatusesResponse {
     statuses: Vec<srp::SRPPayment>,
+    /// Fraction of normal subscription price FCs may pay (from config.toml).
+    fc_srp_price_factor: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -370,11 +374,13 @@ async fn get_srp_status(
             status: Some("Unpaid".to_string()),
             payment_amount: None,
             coverage_type: None,
+            fc_srp_price_factor: app.config.srp_updater.fc_srp_price_factor,
         }));
     }
 
     let character_name = character.unwrap().name;
     let now = chrono::Utc::now().timestamp();
+    let fc_srp_price_factor = app.config.srp_updater.fc_srp_price_factor;
 
     // Helper function to check SRP for a character name
     async fn check_srp_for_character(app: &crate::app::Application, character_name: &str, now: i64) -> Result<Option<(i64, String, f64)>, Madness> {
@@ -450,12 +456,14 @@ async fn get_srp_status(
             status: Some(status),
             payment_amount: Some(payment_amount),
             coverage_type: Some(coverage_type),
+            fc_srp_price_factor,
         }))
     } else {
         Ok(Json(SRPStatusResponse { 
             status: Some("Unpaid".to_string()),
             payment_amount: None,
             coverage_type: None,
+            fc_srp_price_factor,
         }))
     }
 }
@@ -497,7 +505,10 @@ async fn get_all_srp_statuses(
 
     let statuses = srp::get_all_srp_payments(app).await?;
 
-    Ok(Json(AllSRPStatusesResponse { statuses }))
+    Ok(Json(AllSRPStatusesResponse {
+        statuses,
+        fc_srp_price_factor: app.config.srp_updater.fc_srp_price_factor,
+    }))
 }
 
 // GET /api/admin/srp/incursion-focus - Get current incursion focus status
@@ -894,6 +905,9 @@ async fn get_srp_report_srp_validation(
 #[derive(Debug, Deserialize)]
 struct AppraisalRequest {
     destroyed_items: Vec<String>,
+    /// Victim ship type ID from the killmail; used for hull-scoped srp_modified rules.
+    #[serde(default)]
+    hull_type_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -941,7 +955,8 @@ async fn calculate_srp_appraisal(
 ) -> Result<Json<AppraisalResponse>, Madness> {
     account.require_access("commanders-manage:admin")?;
 
-    let (total_value, items) = srp::calculate_srp_appraisal(app, &input.destroyed_items).await?;
+    let (total_value, items) =
+        srp::calculate_srp_appraisal(app, &input.destroyed_items, input.hull_type_id).await?;
 
     Ok(Json(AppraisalResponse {
         total_value,

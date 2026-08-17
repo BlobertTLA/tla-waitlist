@@ -182,48 +182,145 @@ pub async fn fetch_corporation_wallet_journal(
 
 
 
-// Helper function to determine payment type and calculate coverage end date
-fn determine_srp_coverage(payment_amount: f64, payment_date: chrono::DateTime<chrono::Utc>) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
-    // Convert payment amount from millions to decimal format (e.g., 20000000 -> 20.0)
+fn daily_coverage_end(payment_date: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let payment_date_naive = payment_date.naive_utc();
+    let today_11am_time = chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap();
+
+    if payment_date_naive.time() < today_11am_time {
+        // Payment made before 11:00 UTC today, expires at 11:00 UTC today
+        let today_11am = payment_date_naive.date().and_hms_opt(11, 0, 0).unwrap();
+        chrono::DateTime::<chrono::Utc>::from_utc(today_11am, chrono::Utc)
+    } else {
+        // Payment made after 11:00 UTC today, expires at 11:00 UTC tomorrow
+        let tomorrow_11am = (payment_date_naive.date() + chrono::Duration::days(1))
+            .and_hms_opt(11, 0, 0)
+            .unwrap();
+        chrono::DateTime::<chrono::Utc>::from_utc(tomorrow_11am, chrono::Utc)
+    }
+}
+
+fn amount_matches(payment_amount_millions: f64, expected_millions: f64) -> bool {
+    (payment_amount_millions - expected_millions).abs() < 0.01
+}
+
+// Helper function to determine payment type and calculate coverage end date.
+// Full table amounts always match. FC-eligible characters may also pay
+// `fc_price_factor` of a normal tier (e.g. 0.5 of 20M = 10M for 1-character daily).
+fn determine_srp_coverage(
+    payment_amount: f64,
+    payment_date: chrono::DateTime<chrono::Utc>,
+    is_fc_eligible: bool,
+    fc_price_factor: f64,
+) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+    // Convert payment amount from ISK to millions (e.g., 20000000 -> 20.0)
     let payment_amount_decimal = payment_amount / 1_000_000.0;
-            // println!("Checking payment amount: {} ({} millions) against SRP tables", payment_amount, payment_amount_decimal);
-    
-    // Check if it's a daily payment
+
+    // Full-price matches first so FCs paying the normal amount still get that tier
     for (amount, _) in DAILY_PAYMENTS {
-        if (payment_amount_decimal - amount).abs() < 0.01 {
-            // Daily payment: coverage until the next 11:00 UTC
-            let payment_date_naive = payment_date.naive_utc();
-            let today_11am_time = chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap();
-            
-            // println!("DEBUG: Payment date: {}, time: {}, 11am time: {}", 
-            //          payment_date_naive.date(), payment_date_naive.time(), today_11am_time);
-            
-            let coverage_end = if payment_date_naive.time() < today_11am_time {
-                // Payment made before 11:00 UTC today, expires at 11:00 UTC today
-                let today_11am = payment_date_naive.date().and_hms_opt(11, 0, 0).unwrap();
-                let result = chrono::DateTime::<chrono::Utc>::from_utc(today_11am, chrono::Utc);
-                // println!("Payment at {} (before 11:00) -> expires at {}", payment_date_naive, result);
-                result
-            } else {
-                // Payment made after 11:00 UTC today, expires at 11:00 UTC tomorrow
-                let tomorrow_11am = (payment_date_naive.date() + chrono::Duration::days(1)).and_hms_opt(11, 0, 0).unwrap();
-                let result = chrono::DateTime::<chrono::Utc>::from_utc(tomorrow_11am, chrono::Utc);
-                // println!("Payment at {} (after 11:00) -> expires at {}", payment_date_naive, result);
-                result
-            };
-            return Some(("daily".to_string(), coverage_end));
+        if amount_matches(payment_amount_decimal, *amount) {
+            return Some(("daily".to_string(), daily_coverage_end(payment_date)));
         }
     }
 
-    // Check if it's a per focus payment
     for (amount, _) in PER_FOCUS_PAYMENTS {
-        if (payment_amount_decimal - amount).abs() < 0.01 {
-            // Per focus payment: coverage for 8 days from payment date
+        if amount_matches(payment_amount_decimal, *amount) {
             let coverage_end = payment_date + chrono::Duration::days(8);
             return Some(("per_focus".to_string(), coverage_end));
         }
     }
 
+    if is_fc_eligible {
+        for (amount, _) in DAILY_PAYMENTS {
+            if amount_matches(payment_amount_decimal, *amount * fc_price_factor) {
+                return Some(("daily".to_string(), daily_coverage_end(payment_date)));
+            }
+        }
+
+        for (amount, _) in PER_FOCUS_PAYMENTS {
+            if amount_matches(payment_amount_decimal, *amount * fc_price_factor) {
+                let coverage_end = payment_date + chrono::Duration::days(8);
+                return Some(("per_focus".to_string(), coverage_end));
+            }
+        }
+    }
+
+    None
+}
+
+fn is_fc_srp_role(role: &str) -> bool {
+    matches!(role, "fc" | "fc+" | "admin")
+}
+
+/// True if this character, or their linked main, has fc / fc+ / admin.
+async fn character_qualifies_for_fc_srp_discount(
+    character_name: &str,
+    db: &crate::DB,
+) -> Result<bool, Madness> {
+    let character = sqlx::query!(
+        "SELECT id FROM `character` WHERE name = ?",
+        character_name
+    )
+    .fetch_optional(db)
+    .await?;
+
+    let Some(character) = character else {
+        return Ok(false);
+    };
+
+    if let Some(admin) = sqlx::query!(
+        "SELECT role FROM admin WHERE character_id = ?",
+        character.id
+    )
+    .fetch_optional(db)
+    .await?
+    {
+        if is_fc_srp_role(&admin.role) {
+            return Ok(true);
+        }
+    }
+
+    // Alt paying: discount follows the main's FC role
+    if let Some(alt_relation) = sqlx::query!(
+        "SELECT account_id FROM alt_character WHERE alt_id = ?",
+        character.id
+    )
+    .fetch_optional(db)
+    .await?
+    {
+        if let Some(admin) = sqlx::query!(
+            "SELECT role FROM admin WHERE character_id = ?",
+            alt_relation.account_id
+        )
+        .fetch_optional(db)
+        .await?
+        {
+            if is_fc_srp_role(&admin.role) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn extract_deposit_character_name(description: &str) -> Option<String> {
+    // Format: "Character Name deposited cash into [any] account"
+    if description.contains(" deposited cash into ") {
+        let parts: Vec<&str> = description.split(" deposited cash into ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    } else if description.contains(" transferred cash from ") {
+        let parts: Vec<&str> = description.split(" transferred cash from ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    } else if description.contains(" transferred cash to ") {
+        let parts: Vec<&str> = description.split(" transferred cash to ").collect();
+        if !parts.is_empty() && !parts[0].is_empty() {
+            return Some(parts[0].to_string());
+        }
+    }
     None
 }
 
@@ -396,6 +493,14 @@ pub async fn process_srp_payments(app: &crate::app::Application) -> Result<(), M
     let mut tx = app.get_db().begin().await?;
     let now_timestamp = now.timestamp();
     let mut paid_report_ids: Vec<i64> = Vec::new();
+    let fc_price_factor = {
+        let factor = app.config.srp_updater.fc_srp_price_factor;
+        if factor > 0.0 && factor <= 1.0 {
+            factor
+        } else {
+            0.5
+        }
+    };
 
     for entry in entries {
         // Parse the entry date
@@ -428,60 +533,37 @@ pub async fn process_srp_payments(app: &crate::app::Application) -> Result<(), M
             // println!("Processing entry: amount={} ({} millions), date={}, description={}", 
             //          entry.amount, entry.amount / 1_000_000.0, entry.date, entry.description);
             
-            // Determine if this is an SRP payment and calculate coverage
-            if let Some((coverage_type, coverage_end)) = determine_srp_coverage(entry.amount, entry_date) {
-                // println!("Found SRP payment: amount={}, type={}, coverage_end={}", entry.amount, coverage_type, coverage_end);
-                
-                // Extract character name from description
-                // Format: "Character Name deposited cash into [any] account"
-                let character_name = if entry.description.contains(" deposited cash into ") {
-                    let parts: Vec<&str> = entry.description.split(" deposited cash into ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else if entry.description.contains(" transferred cash from ") {
-                    // Handle corporate transfers - extract the sender (first character name)
-                    let parts: Vec<&str> = entry.description.split(" transferred cash from ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else if entry.description.contains(" transferred cash to ") {
-                    // Handle corporate transfers - extract the sender (first character name)
-                    let parts: Vec<&str> = entry.description.split(" transferred cash to ").collect();
-                    if parts.len() > 0 {
-                        parts[0].to_string()
-                    } else {
-                        "Unknown".to_string()
-                    }
-                } else {
-                    "Unknown".to_string()
-                };
+            let Some(character_name) = extract_deposit_character_name(&entry.description) else {
+                continue;
+            };
 
-                // Only process if we got a valid character name
-                if character_name != "Unknown" {
-                    // println!("Creating SRP payment for: {} (amount: {}, expires: {})", character_name, entry.amount, coverage_end);
-                    
-                    // Insert SRP payment
-                    sqlx::query!(
-                        "INSERT INTO srp_payments (
-                            character_name, payment_amount, payment_date, expires_at, coverage_type, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)",
-                        character_name,
-                        entry.amount,
-                        entry_date.timestamp(),
-                        coverage_end.timestamp(),
-                        coverage_type,
-                        now_timestamp
-                    )
-                    .execute(&mut tx)
-                    .await?;
-                    
-                    // println!("Successfully created SRP payment for {}", character_name);
-                }
+            let is_fc_eligible =
+                character_qualifies_for_fc_srp_discount(&character_name, app.get_db()).await?;
+
+            // Determine if this is an SRP payment and calculate coverage
+            if let Some((coverage_type, coverage_end)) =
+                determine_srp_coverage(entry.amount, entry_date, is_fc_eligible, fc_price_factor)
+            {
+                // println!("Found SRP payment: amount={}, type={}, coverage_end={}, fc_discount={}", entry.amount, coverage_type, coverage_end, is_fc_eligible);
+                
+                // println!("Creating SRP payment for: {} (amount: {}, expires: {})", character_name, entry.amount, coverage_end);
+                
+                // Insert SRP payment
+                sqlx::query!(
+                    "INSERT INTO srp_payments (
+                        character_name, payment_amount, payment_date, expires_at, coverage_type, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)",
+                    character_name,
+                    entry.amount,
+                    entry_date.timestamp(),
+                    coverage_end.timestamp(),
+                    coverage_type,
+                    now_timestamp
+                )
+                .execute(&mut tx)
+                .await?;
+                
+                // println!("Successfully created SRP payment for {}", character_name);
             }
         } else if entry.amount < 0.0 {
             // Process outgoing SRP payouts (negative amounts)
@@ -1039,6 +1121,7 @@ pub async fn check_srp_status_at_time(
 pub async fn calculate_srp_appraisal(
     app: &crate::app::Application,
     destroyed_items: &[String],
+    hull_type_id: Option<i64>,
 ) -> Result<(f64, Vec<serde_json::Value>), Madness> {
     if destroyed_items.is_empty() {
         return Ok((0.0, Vec::new()));
@@ -1076,20 +1159,169 @@ pub async fn calculate_srp_appraisal(
     let appraisal_data: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| Madness::BadRequest(format!("Failed to parse Janice API response: {}", e)))?;
 
-    // Extract the total value and items from the response
-    let total_value = appraisal_data
-        .get("effectivePrices")
-        .and_then(|v| v.get("totalSellPrice"))
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| Madness::BadRequest("Invalid response format from Janice API - missing totalSellPrice".to_string()))?;
-
-    let items = appraisal_data
+    let mut items = appraisal_data
         .get("items")
         .and_then(|v| v.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_else(Vec::new);
 
+    let hull = hull_type_id.map(|id| id as eve_data_core::TypeID);
+
+    // Apply modules.yaml srp_modified overrides (market % or flat ISK) and recompute total.
+    let total_value = apply_srp_modified_price_overrides(&mut items, hull)?;
+
     Ok((total_value, items))
+}
+
+/// Adjust Janice item prices using `srp_modified` from modules.yaml, then sum totals.
+fn apply_srp_modified_price_overrides(
+    items: &mut Vec<serde_json::Value>,
+    hull: Option<eve_data_core::TypeID>,
+) -> Result<f64, Madness> {
+    let overrides = crate::data::variations::srp_modified_modules().map_err(|e| {
+        Madness::BadRequest(format!("Failed to load srp_modified config: {}", e))
+    })?;
+
+    let mut total_value = 0.0;
+
+    for item in items.iter_mut() {
+        // Janice v2 uses itemType.eid for the EVE type ID (not itemType.id).
+        let type_id = item
+            .pointer("/itemType/eid")
+            .or_else(|| item.pointer("/itemType/id"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as eve_data_core::TypeID;
+        let type_name = item
+            .pointer("/itemType/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let amount = item
+            .get("amount")
+            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+            .unwrap_or(1.0)
+            .max(0.0);
+
+        let janice_unit = item
+            .pointer("/effectivePrices/sellPrice")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let janice_total = item
+            .pointer("/effectivePrices/sellPriceTotal")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(janice_unit * amount);
+
+        let rule = overrides.get(&type_id).cloned().or_else(|| {
+            // Fallback: resolve by Janice type name if eid lookup missed.
+            if type_name.is_empty() {
+                return None;
+            }
+            eve_data_core::TypeDB::id_of(type_name)
+                .ok()
+                .and_then(|id| overrides.get(&id).cloned())
+        });
+
+        let pricing = rule.and_then(|r| {
+            if r.applies_to_hull(hull) {
+                Some(r.pricing)
+            } else {
+                None
+            }
+        });
+
+        let (sell_price, sell_total, override_meta) = match pricing {
+            Some(crate::data::variations::SrpModifiedPricing::MarketPercent(pct)) => {
+                let factor = pct / 100.0;
+                let unit = janice_unit * factor;
+                let total = janice_total * factor;
+                (
+                    unit,
+                    total,
+                    Some(serde_json::json!({
+                        "market_percent": pct,
+                        "janice_sell_price": janice_unit,
+                        "janice_sell_price_total": janice_total,
+                    })),
+                )
+            }
+            Some(crate::data::variations::SrpModifiedPricing::Flat(flat)) => {
+                let unit = flat as f64;
+                let total = unit * amount;
+                (
+                    unit,
+                    total,
+                    Some(serde_json::json!({
+                        "flat": flat,
+                        "janice_sell_price": janice_unit,
+                        "janice_sell_price_total": janice_total,
+                    })),
+                )
+            }
+            None => (janice_unit, janice_total, None),
+        };
+
+        if let Some(prices) = item.get_mut("effectivePrices") {
+            if let Some(obj) = prices.as_object_mut() {
+                obj.insert(
+                    "sellPrice".to_string(),
+                    serde_json::Value::from(sell_price),
+                );
+                obj.insert(
+                    "sellPriceTotal".to_string(),
+                    serde_json::Value::from(sell_total),
+                );
+            }
+        } else {
+            item.as_object_mut().map(|obj| {
+                obj.insert(
+                    "effectivePrices".to_string(),
+                    serde_json::json!({
+                        "sellPrice": sell_price,
+                        "sellPriceTotal": sell_total,
+                    }),
+                )
+            });
+        }
+
+        if let Some(meta) = override_meta {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("srp_override".to_string(), meta);
+            }
+        }
+
+        total_value += sell_total;
+    }
+
+    Ok(total_value)
+}
+
+#[cfg(test)]
+mod srp_modified_override_tests {
+    use super::apply_srp_modified_price_overrides;
+
+    #[test]
+    fn overrides_peace_by_eid_on_allowed_hull() {
+        let paladin = eve_data_core::TypeDB::id_of("Paladin").unwrap();
+        let mut items = vec![serde_json::json!({
+            "amount": 2,
+            "itemType": {
+                "eid": 23416,
+                "name": "'Peace' Large Remote Armor Repairer"
+            },
+            "effectivePrices": {
+                "sellPrice": 12345.0,
+                "sellPriceTotal": 24690.0
+            }
+        })];
+
+        let total =
+            apply_srp_modified_price_overrides(&mut items, Some(paladin)).expect("override apply");
+        assert_eq!(total, 2_000_000_000.0);
+        assert_eq!(
+            items[0]["effectivePrices"]["sellPrice"].as_f64().unwrap(),
+            1_000_000_000.0
+        );
+        assert_eq!(items[0]["srp_override"]["flat"].as_i64().unwrap(), 1_000_000_000);
+    }
 }
 
 pub async fn approve_srp_report(

@@ -58,6 +58,10 @@ impl SRPUpdater {
     }
 
     fn create_app(&self) -> crate::app::Application {
-        crate::app::new(self.db.clone(), self.config.clone())
+        crate::app::new(
+            self.db.clone(),
+            self.config.clone(),
+            crate::data::war::new_shared_cache(),
+        )
     }
 }

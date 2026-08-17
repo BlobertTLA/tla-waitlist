@@ -144,4 +144,65 @@ impl AffiliationService {
 
         Ok(())
     }
+
+    /// Bulk-update character corporation_ids via POST /characters/affiliation/.
+    /// Ensures corporation (and alliance) rows exist for FK constraints.
+    pub async fn update_characters_affiliation_bulk(
+        &self,
+        character_ids: &[i64],
+    ) -> Result<(), Madness> {
+        if character_ids.is_empty() {
+            return Ok(());
+        }
+
+        // ESI allows up to 1000 ids per request; chunk just in case.
+        for chunk in character_ids.chunks(1000) {
+            let affiliations = self
+                .esi_client
+                .get_character_affiliations(chunk)
+                .await?;
+
+            let mut corp_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            for aff in &affiliations {
+                corp_ids.insert(aff.corporation_id);
+            }
+            for corp_id in corp_ids {
+                self.update_corp_affiliation(corp_id).await?;
+            }
+
+            let names = self.esi_client.get_bulk_names(chunk).await.unwrap_or_default();
+
+            for aff in affiliations {
+                let name = names
+                    .get(&aff.character_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Character {}", aff.character_id));
+
+                if let None = sqlx::query!("SELECT id FROM `character` WHERE id=?", aff.character_id)
+                    .fetch_optional(self.db.as_ref())
+                    .await?
+                {
+                    sqlx::query!(
+                        "INSERT INTO `character` (id, name, corporation_id) VALUES (?, ?, ?)",
+                        aff.character_id,
+                        name,
+                        aff.corporation_id
+                    )
+                    .execute(self.db.as_ref())
+                    .await?;
+                } else {
+                    sqlx::query!(
+                        "UPDATE `character` SET name=?, corporation_id=? WHERE id=?",
+                        name,
+                        aff.corporation_id,
+                        aff.character_id
+                    )
+                    .execute(self.db.as_ref())
+                    .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

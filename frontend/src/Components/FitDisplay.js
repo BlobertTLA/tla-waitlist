@@ -182,6 +182,12 @@ function extractAnalysisIds(analysis) {
       Object.keys(newItems).forEach((id) => ids.add(id));
     });
   }
+  if (analysis.srp_modified) {
+    analysis.srp_modified.forEach((entry) => {
+      const id = entry && typeof entry === "object" ? entry.type_id : entry;
+      if (id != null) ids.add(String(id));
+    });
+  }
 
   return Array.from(ids).sort();
 }
@@ -286,8 +292,52 @@ function copyableFit(hull, slots, moduleInfo) {
   return fit;
 }
 
-function DisplaySlot({ isDiff, groups, moduleInfo }) {
+function formatSrpBadge(entry) {
+  if (!entry) return "SRP";
+  if (entry.market_percent != null) {
+    const pct = Number(entry.market_percent);
+    return `SRP ${pct % 1 === 0 ? pct.toFixed(0) : pct}%`;
+  }
+  if (entry.flat != null) {
+    return `SRP ${formatIsk(entry.flat)}`;
+  }
+  return "SRP";
+}
+
+function formatIsk(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(abs >= 10e9 ? 0 : 1)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(abs >= 10e6 ? 0 : 1)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(abs >= 10e3 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function buildSrpModifiedMap(analysis) {
+  const map = new Map();
+  if (!analysis || !analysis.srp_modified) return map;
+  analysis.srp_modified.forEach((entry) => {
+    // Back-compat: old analyses stored bare type IDs
+    if (entry == null) return;
+    if (typeof entry !== "object") {
+      map.set(Number(entry), { type_id: Number(entry) });
+      map.set(String(entry), { type_id: Number(entry) });
+      return;
+    }
+    map.set(Number(entry.type_id), entry);
+    map.set(String(entry.type_id), entry);
+  });
+  return map;
+}
+
+function DisplaySlot({ isDiff, groups, moduleInfo, srpModified }) {
   const showGroups = isDiff ? ["match", "missing", "extra"] : ["have"];
+  const srpBadge = (moduleId) => {
+    const entry = srpModified.get(String(moduleId)) || srpModified.get(Number(moduleId));
+    if (!entry) return null;
+    return <Badge variant="warning">{formatSrpBadge(entry)}</Badge>;
+  };
   return (
     <DOM.Slot>
       {showGroups.map((group) =>
@@ -299,6 +349,7 @@ function DisplaySlot({ isDiff, groups, moduleInfo }) {
             />
             <DOM.Line.Count>{count}</DOM.Line.Count>
             <DOM.Line.ModuleName>{(moduleInfo[moduleId] || {}).name || null}</DOM.Line.ModuleName>
+            {srpBadge(moduleId)}
           </DOM.Line>
         ))
       )}
@@ -315,6 +366,7 @@ function DisplaySlot({ isDiff, groups, moduleInfo }) {
                 <DOM.Line.ModuleName>
                   {(moduleInfo[origModuleId] || {}).name || null}
                 </DOM.Line.ModuleName>
+                {srpBadge(origModuleId)}
               </DOM.Line>
               <DOM.Line group="downgraded_new">
                 <DOM.Line.Image
@@ -325,6 +377,7 @@ function DisplaySlot({ isDiff, groups, moduleInfo }) {
                 <DOM.Line.ModuleName>
                   {(moduleInfo[newModuleId] || {}).name || null}
                 </DOM.Line.ModuleName>
+                {srpBadge(newModuleId)}
               </DOM.Line>
             </React.Fragment>
           ))
@@ -342,6 +395,8 @@ export function DNADisplay({ dna, analysis = null, name = null }) {
     () => filterSlots(counts, analysis, moduleInfo),
     [counts, analysis, moduleInfo]
   );
+  const hasSrpModified = Boolean(analysis && analysis.srp_modified && analysis.srp_modified.length);
+  const srpModified = React.useMemo(() => buildSrpModifiedMap(analysis), [analysis]);
 
   if (!moduleInfo || !moduleInfo[hull]) {
     return (
@@ -380,8 +435,19 @@ export function DNADisplay({ dna, analysis = null, name = null }) {
           <Badge variant="danger">Fit could not be automatically checked!</Badge>
         </DOM.Warning>
       ) : null}
+      {hasSrpModified ? (
+        <DOM.Warning>
+          <Badge variant="warning">Some modules may modify SRP value</Badge>
+        </DOM.Warning>
+      ) : null}
       {Object.entries(slots).map(([slot, groups]) => (
-        <DisplaySlot key={slot} isDiff={analysis != null} groups={groups} moduleInfo={moduleInfo} />
+        <DisplaySlot
+          key={slot}
+          isDiff={analysis != null}
+          groups={groups}
+          moduleInfo={moduleInfo}
+          srpModified={srpModified}
+        />
       ))}
     </div>
   );
